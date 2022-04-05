@@ -1,0 +1,267 @@
+setwd("~Desktop/Stuff/Lucra")
+library(tidyverse)
+
+# Load and clean data
+data <- read_csv("data.csv")
+data <- data %>%
+  mutate(OrderTotal = Quantity*UnitPrice) %>%
+  mutate(isReturn = ifelse(Quantity < 0, 1, 0))
+
+naRows <- data[rowSums(is.na(data)) > 0,] #peek at rows missing values - can see it is mostly customer ID #s
+
+#Basic stats to begin exploring
+mean(data$Quantity) #average quantity is 9.55 which suggests people normally buy in bulk
+median(data$Quantity) #median=3 is less than one third of the mean, suggesting data skewed by some big orders
+mean(data$OrderTotal) #17.99 average order total
+median(data$OrderTotal)#yet only 9.75 median order total (so can reach same conclusion as quantity)
+
+############################################################################################################
+#What is being bought? are there products that should be removed from the catalogue?
+
+numProductsPlot <- barplot(table(data$StockCode), main = "Quantity Sold by Product")
+var(table(data$StockCode))
+mean(table(data$StockCode))
+# As visible in the barplot and by the mean and variance, there are a handful of products that sell often
+# while the majority sell under 500 units.
+quantities <- data.frame(table(data$StockCode)) %>%
+  rename(StockCode = Var1, Quantity = Freq)
+quantities <- quantities[order(quantities$Quantity, decreasing = TRUE), ] #sort by quantity (most to least)
+sum(quantities$Quantity) # = 541909 total units sold
+quantities <- quantities %>% #Tells us that 1351/4070 products sold 25 or fewer units (about 33.2%)
+  filter(Quantity <= 25) 
+sum(quantities$Quantity) # = 11719 units sold by products with <= 25 units sold (makes up 2.16% of total units)
+quantities <- quantities %>% #Tells us that 40/4070 products sold 1000 or more units (about 0.98%)
+  filter(Quantity >= 1000) 
+sum(quantities$Quantity) # = 51901 units sold by products with >= 1000 units sold (makes up 9.6% of total units)
+
+#Create datafram to create linechart showing
+quantitiesSold <- data.frame(table(data$StockCode)) %>%
+  rename(StockCode = Var1, Quantity = Freq)
+quantitiesSold <- quantitiesSold[order(quantitiesSold$Quantity, decreasing = TRUE), ] #sort by quantity (most to least)
+
+data <- merge(data, quantitiesSold, by = "StockCode", all.x = TRUE, all.y = TRUE) %>%
+  rename(OrderQuantity = Quantity.x, ProductQuantity = Quantity.y) %>%
+  mutate(ProductRevenue = ProductQuantity*UnitPrice) %>%
+  filter(ProductRevenue > 0) #removes rows without pricing information and weird rows used by company to make adjustments
+data <- data[order(data$ProductRevenue, decreasing = FALSE), ] %>% #sort by product revenue (least to highest)
+  group_by(StockCode) %>%
+  ungroup()
+
+#Chart
+ProductRevenues <- data[!duplicated(data$StockCode,fromLast=TRUE), ] 
+ProductRevenues <- ProductRevenues %>%
+  select(StockCode, Description, UnitPrice, ProductQuantity, ProductRevenue) %>%
+  tibble::rowid_to_column("RowNumber") %>% #Add row number column
+  mutate(SumOfPreviousRevenue = cumsum(ProductRevenue))%>%
+  mutate(PercentOfRevenue = ProductRevenue/40346132) %>%
+  mutate(PreviousSumPercentOfTotalRevenue = SumOfPreviousRevenue/40346132)
+sum(ProductRevenues$ProductRevenue) # = 40346132
+mean(ProductRevenues$ProductQuantity)
+median(ProductRevenues$ProductQuantity)
+
+#Top ten highest-grossing products
+k <- ProductRevenues %>% filter(RowNumber >= 3929)
+sum(k$ProductRevenue)
+
+
+a <- ggplot(ProductRevenues, aes(x=RowNumber/3938, y=PreviousSumPercentOfTotalRevenue)) +
+  geom_point() +
+  labs(title = "Percent of Revenue vs. Percent of Products") +
+  ylab("Percent of Revenue") +
+  xlab("Percent of Products") +
+  theme_light()
+# Can see clearly that almost all of the revenue is achieved by a handful of the biggest products, while
+# ~80% produce little-to-no revenue at all. Keeping only top-25% highest grossing products means sacrificing
+# very little revenue
+############################################################################################################
+#What products to drop? ensure no products purchased by customers who order big so they have no reason to leave
+
+products <- ProductRevenues$StockCode
+remove <- c()
+removeIndexes <- c()
+for(i in products){
+  
+  t <- ProductRevenues %>%
+    filter(StockCode == i)
+  Purchasers <- t$CustomerID
+  
+  w <- SpendingByCustomer %>%
+    filter(NumOrders >= 5)
+  ConsistentCustomers <- w$CustomerID
+  
+  p <- ProductRevenues %>%
+    filter(StockCode == i)
+  
+  numCommonElements <- length(intersect(Purchasers, ConsistentCustomers))
+  
+  if((p$RowNumber[1]/3938 < .7) & (numCommonElements == 0)){
+    
+    remove <- append(remove, i)
+    removeIndexes <- append(removeIndexes, p$RowNumber[1])
+    
+  }
+  print(i)
+}
+
+dataRemovedProducts <- ProductRevenues[-removeIndexes,]
+for(i in remove){
+  
+  dataRemovedProducts <- subset(dataRemovedProducts, !(dataRemovedProducts$StockCode %in% remove))
+  print(i)
+}
+sum(dataRemovedProducts$ProductRevenue)/sum(ProductRevenues$ProductRevenue)
+#Getting rid of 2756 of the 3938 different products allows company to retain 98.83% of revenue
+n_distinct(data$StockCode)
+
+############################################################################################################
+#Who is buying it? where are they from? large orders or small orders? could dictate advertisment strategy.
+
+data <- read_csv("data.csv")
+data <- data %>%
+  mutate(OrderTotal = Quantity*UnitPrice) %>%
+  mutate(isReturn = ifelse(Quantity < 0, 1, 0)) %>%
+  group_by(CustomerID)
+SpendingByCustomer <- summarise(data, TotalSpent = sum(OrderTotal), ProductsBought = n_distinct(StockCode),
+                                NumOrders = n_distinct(InvoiceNo)) %>%
+  mutate(AvgOrderTotal = TotalSpent/NumOrders) %>%
+  filter(AvgOrderTotal >= 0) #Filter out weird rows used to balance refunds
+
+#Provides number of customers who ordered each amount and relative frequencies
+reorderData <- SpendingByCustomer %>% 
+  group_by(NumOrders) %>%
+  summarise(NumCustomers=n(), TotalRevenue=sum(TotalSpent)) %>%
+  mutate(Freq = NumCustomers/sum(NumCustomers)) %>%
+  mutate(AvgOrderTotal = TotalRevenue/NumCustomers)
+
+expectedValueNewCustomer <- sum(reorderData$Freq*reorderData$AvgOrderTotal) # =2253.226
+
+ConsistentlyReorderData <- reorderData %>%
+  filter(NumOrders >= 5) %>%
+  select(NumOrders, NumCustomers, TotalRevenue, AvgOrderTotal) %>%
+  mutate(Freq = NumCustomers/sum(NumCustomers))
+expectedValueNewConsistentCustomer <- sum(ConsistentlyReorderData$Freq*ConsistentlyReorderData$AvgOrderTotal)
+# =11748.21
+sum(ConsistentlyReorderData$AvgOrderTotal*ConsistentlyReorderData$NumCustomers)
+sum(ConsistentlyReorderData$NumCustomers)
+
+
+#Number of orders vs avg order total (not including customer with 3710 orders ordering millions at a time)
+OrdersVsAvgTotal <- ggplot(reorderData[1:60,], aes(x=NumOrders, y=AvgOrderTotal)) +
+  geom_point() +
+  labs(title = "Order Total vs. Number of Orders") +
+  xlab("Number of Orders") +
+  ylab("Order Total") +
+  theme_light() +
+  geom_smooth(method='lm') +
+  scale_y_continuous(labels = scales::comma)
+  
+cor(reorderData$NumOrders, reorderData$AvgOrderTotal) #=.967
+
+#############################################################################################################
+#Return policy? does allowing customers to return things make them more likely to purchase again?
+originalData <- read_csv("data.csv") %>%
+  mutate(OrderTotal = Quantity*UnitPrice) %>%
+  mutate(isReturn = ifelse(Quantity < 0, 1, 0))
+returns <- originalData %>%
+  mutate(OrderTotal = Quantity*UnitPrice) %>%
+  mutate(isReturn = ifelse(Quantity < 0, 1, 0)) %>%
+  filter(isReturn == 1) %>%
+  group_by(CustomerID) %>%
+  summarise(RefundTotal = -1*sum(OrderTotal), NumRefunds = n_distinct(InvoiceNo), InvoiceDate = InvoiceDate)
+
+returns <- returns[order(returns$InvoiceDate),]
+returns <- returns[!duplicated(returns$CustomerID),]
+sum(returns$RefundTotal)
+sum(returns$NumRefunds)
+returns <- returns[!is.na(returns$CustomerID),]
+#Has given out 5172 refunds for a total of $896,812.50 (average about $85 per order)
+#1518 refunds given without customer ID for total of $285470.40
+
+multipleRefunds <- returns %>%
+  filter(NumRefunds >= 2)
+
+refundsReceived <- originalData %>%
+  mutate(OrderTotal = Quantity*UnitPrice) %>%
+  mutate(isReturn = ifelse(Quantity < 0, 1, 0))
+refundsReceived <- refundsReceived[refundsReceived$CustomerID %in% returns$CustomerID,] %>% #make so only people who received refunds are in df
+  group_by(InvoiceNo) %>%
+  summarise(OrderTotal = sum(OrderTotal), CustomerID = CustomerID, InvoiceDate = InvoiceDate,
+            isReturn = isReturn) %>%
+  drop_na(CustomerID)
+refundsReceived <- unique(refundsReceived)
+
+CustomerIDs <- refundsReceived$CustomerID
+
+ordersAfterRefund <- data.frame(matrix(ncol = 3, nrow = 0))
+colnames(ordersAfterRefund) <- c('CustomerID', 'NumOrders', 'TotalSpent')
+
+for(i in CustomerIDs){
+  
+  #Refund Date
+  refundDate <- returns %>%
+    filter(CustomerID == i)
+  refundDate <- refundDate$InvoiceDate
+  
+  #Now that we have date, find orders placed by same customer after refund was received
+  customerOrders <- data %>%
+    filter(CustomerID == i) %>%
+    filter(InvoiceDate > refundDate) %>%
+    filter(isReturn == 0)
+  
+  ordersAfter <- refundsReceived %>%
+    filter(CustomerID == i) %>%
+    filter(InvoiceDate > refundDate) %>%
+    filter(isReturn == 0)
+  
+  row <- data.frame(i, nrow(ordersAfter), sum(customerOrders$OrderTotal))
+  
+  ordersAfterRefund <- rbind(ordersAfterRefund, row)
+  print(i)
+  
+}
+ordersAfterRefund <- ordersAfterRefund %>%
+  rename(CustomerID = i, OrdersAfterRefund = nrow.ordersAfter., OrdersTotalAfterRefund = sum.customerOrders.OrderTotal.)
+#Length of 1589 => 1589 customers received refunds
+
+noPurchaseAfterRefund <- ordersAfterRefund %>%
+  filter(OrdersAfterRefund == 0)
+#333 rows => 333 people did not order again after receiving a refund
+# => 1256 did order again
+yesPurchaseAfterRefund <- ordersAfterRefund %>%
+  filter(OrdersAfterRefund > 0)
+
+mean(yesPurchaseAfterRefund$OrdersTotalAfterRefund) #spend an average of 3468 after refund
+mean(yesPurchaseAfterRefund$OrdersAfterRefund)      #over 6.34 orders
+
+consistentPurchaseAfterRefund <- ordersAfterRefund %>%
+  filter(OrdersAfterRefund >= 10)
+#207 rows => 207 costumers reordered 10+ times
+
+a <- ordersAfterRefund %>%
+  group_by(OrdersAfterRefund) %>%
+  summarise(NumCustomers = n_distinct(CustomerID), Spent = sum(OrdersTotalAfterRefund)) %>%
+  mutate(Freq = NumCustomers/sum(NumCustomers))
+weighted.mean((a$Spent*a$Freq)) # = 2327.94 is expetced value of a customer who reorders after refund
+
+n_distinct(data$CustomerID) # = 4373 
+#4373 customers have ordered
+#Of the 4373, 1589 people received refunds (refund rate of .36)
+#Of the 1589, 1256 reordered (  p(reorder | received refund) = .79   )
+#p(reorder) = .7 (only .9 less than reorder rate given they've received refund)
+weighted.mean(reorderData$AvgOrderTotal, reorderData$Freq) # = 2253.23 is expected value of a customer
+
+mean(returns$RefundTotal) # = 384.73 is average refund amount
+
+#E(x) of refund is (.79)*(2327.94-328.86) + (.21)*(-328.86) = 1510.21 (743 dollars less then avg customer)
+
+z <- merge(returns, SpendingByCustomer)
+plot(z$NumRefunds, z$TotalSpent-z$RefundTotal, xlab="Number of Refunds Given", ylab="Revenue Generated",
+     title = "Refunds Given vs Revenue Generated")
+g <- ggplot(z, aes(x=NumRefunds, y=(TotalSpent - RefundTotal))) +
+  geom_point() +
+  xlab("Number of Refunds Given") +
+  ylab("Revenue Generated") +
+  labs(title="Number of Refunds vs. Revenue Generated") + 
+  theme_light() +
+  scale_y_continuous(labels = scales::comma)
+cor(z$NumRefunds, z$TotalSpent-z$RefundTotal)
